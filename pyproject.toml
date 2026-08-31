@@ -21,7 +21,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "mcp>=2.0.0,<3",
+    "mcp>=2.1.1,<3",
     "python-reapy>=0.10.0",
     "numpy>=1.24.0",
     "librosa>=0.10.0",

@@ -60,6 +60,7 @@ from reaper_mcp.mixing_tools import register_tools as _reg_mixing
 from reaper_mcp.render_tools import register_tools as _reg_render
 from reaper_mcp.mastering_tools import register_tools as _reg_mastering
 from reaper_mcp.analysis_tools import register_tools as _reg_analysis
+from reaper_mcp.envelope_tools import register_tools as _reg_envelope
 
 _reg_project(_registrar)
 _reg_track(_registrar)
@@ -70,3 +71,4 @@ _reg_mixing(_registrar)
 _reg_render(_registrar)
 _reg_mastering(_registrar)
 _reg_analysis(_registrar)
+_reg_envelope(_registrar)

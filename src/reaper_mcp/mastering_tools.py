@@ -5,6 +5,8 @@ import reapy
 from reapy import reascript_api as RPR
 
 from reaper_mcp.connection import get_project
+from reaper_mcp.fx_tools import _param_formatted, _param_name
+from reaper_mcp.units import db_to_gain, gain_to_db
 
 logger = logging.getLogger("reaper_mcp.mastering_tools")
 
@@ -23,12 +25,14 @@ def register_tools(mcp):
         try:
             project = get_project()
             master = project.master_track
-            fx_index = master.add_fx(fx_name)
-            if fx_index < 0:
-                return {"success": False, "error": f"Plugin not found: '{fx_name}'"}
-            fx = master.fxs[fx_index]
+            # add_fx returns an FX object and raises ValueError on an unknown name.
+            fx = master.add_fx(fx_name)
+            fx_index = fx.index
             return {"success": True, "fx_index": fx_index, "name": fx.name, "n_params": fx.n_params}
+        except ValueError:
+            return {"success": False, "error": f"Plugin not found: '{fx_name}'"}
         except Exception as e:
+            logger.error(f"add_master_fx failed: {e}")
             return {"success": False, "error": str(e)}
 
     @mcp.tool()
@@ -51,16 +55,22 @@ def register_tools(mcp):
         try:
             project = get_project()
             master = project.master_track
-            fx = master.fxs[fx_index]
-            fx.params[param_index].normalized_value = value
+            # reapy's FXParam subclasses float, so `.normalized_value = v` only sets
+            # a throwaway Python attribute and never reaches REAPER; use ReaScript.
+            ok = RPR.TrackFX_SetParamNormalized(master.id, fx_index, param_index, value)
+            if not ok:
+                return {"success": False, "error": "REAPER rejected the parameter write"}
             return {
                 "success": True,
                 "fx_index": fx_index,
                 "param_index": param_index,
-                "param_name": fx.params[param_index].name,
-                "value": value,
+                "param_name": _param_name(master, fx_index, param_index),
+                "requested_value": value,
+                "value": RPR.TrackFX_GetParamNormalized(master.id, fx_index, param_index),
+                "formatted_value": _param_formatted(master, fx_index, param_index),
             }
         except Exception as e:
+            logger.error(f"set_master_fx_parameter failed: {e}")
             return {"success": False, "error": str(e)}
 
     @mcp.tool()
@@ -69,9 +79,10 @@ def register_tools(mcp):
         try:
             project = get_project()
             master = project.master_track
-            master.volume = volume_db
-            return {"success": True, "volume_db": master.volume}
+            master.set_info_value("D_VOL", db_to_gain(volume_db))
+            return {"success": True, "volume_db": round(gain_to_db(master.get_info_value("D_VOL")), 2)}
         except Exception as e:
+            logger.error(f"set_master_volume failed: {e}")
             return {"success": False, "error": str(e)}
 
     @mcp.tool()
@@ -93,39 +104,56 @@ def register_tools(mcp):
             master = project.master_track
             added = []
             for fx_name in MASTERING_PRESETS[preset]:
-                fx_index = master.add_fx(fx_name)
-                if fx_index >= 0:
-                    fx = master.fxs[fx_index]
-                    added.append({"fx_index": fx_index, "name": fx.name})
+                try:
+                    fx = master.add_fx(fx_name)
+                except ValueError:
+                    logger.warning(f"Skipping unavailable plugin '{fx_name}'")
+                    continue
+                added.append({"fx_index": fx.index, "name": fx.name})
             return {"success": True, "preset": preset, "fx_chain": added}
         except Exception as e:
+            logger.error(f"apply_mastering_chain failed: {e}")
             return {"success": False, "error": str(e)}
 
     @mcp.tool()
     def apply_limiter(threshold_db: float = -0.5, release_ms: float = 50.0) -> dict:
         """
-        Add ReaLimit to the master track.
-        After adding, use set_master_fx_parameter with the parameter indices from
-        get_fx_parameters to set the threshold and release values.
+        Add ReaLimit to the master track and set its threshold (dB) and release (ms).
+        The parameters are matched by name and written in the plugin's own units;
+        the returned `applied` list shows what ReaLimit reports back, and any that
+        could not be matched appear under `unmatched` (set those with
+        set_master_fx_parameter after looking them up with get_fx_parameters).
         """
         try:
             project = get_project()
             master = project.master_track
-            fx_index = master.add_fx("ReaLimit")
-            if fx_index < 0:
-                return {"success": False, "error": "ReaLimit not found — check REAPER installation"}
-            fx = master.fxs[fx_index]
+            fx = master.add_fx("ReaLimit")
+            fx_index = fx.index
+            wanted = {"threshold": threshold_db, "release": release_ms}
+            applied, unmatched = [], dict(wanted)
+            for i in range(fx.n_params):
+                name = _param_name(master, fx_index, i)
+                for key, value in wanted.items():
+                    if key in name.lower() and key in unmatched:
+                        RPR.TrackFX_SetParam(master.id, fx_index, i, value)
+                        applied.append({
+                            "param_index": i,
+                            "param_name": name,
+                            "requested": value,
+                            "formatted_value": _param_formatted(master, fx_index, i),
+                        })
+                        unmatched.pop(key)
             return {
                 "success": True,
                 "fx_index": fx_index,
                 "name": fx.name,
-                "hint": (
-                    f"ReaLimit added at index {fx_index}. "
-                    "Use get_fx_parameters to find threshold/release param indices, "
-                    "then use set_master_fx_parameter to set them."
-                ),
+                "applied": applied,
+                "unmatched": sorted(unmatched),
             }
+        except ValueError:
+            return {"success": False, "error": "ReaLimit not found — check REAPER installation"}
         except Exception as e:
+            logger.error(f"apply_limiter failed: {e}")
             return {"success": False, "error": str(e)}
 
     @mcp.tool()
@@ -187,8 +215,9 @@ def register_tools(mcp):
             gain_db = target_lufs - current_lufs
             project = get_project()
             master = project.master_track
-            new_vol_db = master.volume + gain_db
-            master.volume = new_vol_db
+            current_vol_db = gain_to_db(master.get_info_value("D_VOL"))
+            new_vol_db = current_vol_db + gain_db
+            master.set_info_value("D_VOL", db_to_gain(new_vol_db))
 
             return {
                 "success": True,
@@ -198,4 +227,5 @@ def register_tools(mcp):
                 "new_master_volume_db": round(new_vol_db, 1),
             }
         except Exception as e:
+            logger.error(f"normalize_project failed: {e}")
             return {"success": False, "error": str(e)}

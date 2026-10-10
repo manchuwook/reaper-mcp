@@ -103,9 +103,12 @@ def register_tools(mcp):
             take = item.active_take
             if not take.is_midi:
                 return {"success": False, "error": "Item is not a MIDI item"}
+            # Take.add_note(unit="seconds") takes *project* time, so shift the
+            # item-relative start by where the item sits on the timeline.
+            abs_start = item.position + start
             take.add_note(
-                start=start,
-                end=start + length,
+                start=abs_start,
+                end=abs_start + length,
                 pitch=pitch,
                 velocity=velocity,
                 channel=channel,
@@ -152,7 +155,8 @@ def register_tools(mcp):
             for i, chord_str in enumerate(chord_list):
                 try:
                     intervals, root_num = _parse_chord(chord_str)
-                    chord_start = i * chord_length
+                    # absolute project time: add_note does not take item-relative time
+                    chord_start = start_position + i * chord_length
                     for interval in intervals:
                         note_num = 60 + root_num + interval
                         take.add_note(
@@ -199,6 +203,8 @@ def register_tools(mcp):
         try:
             project = get_project()
             track = project.tracks[track_index]
+            if not pattern:
+                return {"success": False, "error": "pattern must not be empty"}
             seconds_per_beat = 60.0 / project.bpm
             pattern_length = seconds_per_beat * beats
             total_length = pattern_length * repeats
@@ -211,7 +217,8 @@ def register_tools(mcp):
                 offset = repeat * pattern_length
                 for i, char in enumerate(pattern):
                     if char in DRUM_MAPPINGS:
-                        note_start = offset + i * time_per_step
+                        # absolute project time: add_note does not take item-relative time
+                        note_start = start_position + offset + i * time_per_step
                         take.add_note(
                             start=note_start,
                             end=note_start + time_per_step * 0.5,

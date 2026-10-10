@@ -49,11 +49,17 @@ def register_tools(mcp):
         try:
             project = get_project()
             track = project.tracks[track_index]
-            track.armed = True
+            # reapy's Track has no `armed` attribute: assigning one silently does
+            # nothing, and transport-record then records no track at all.
+            RPR.SetMediaTrackInfo_Value(track.id, "I_RECARM", 1)
+            armed = bool(RPR.GetMediaTrackInfo_Value(track.id, "I_RECARM"))
+            if not armed:
+                return {"success": False, "error": "REAPER did not arm the track"}
             RPR.Main_OnCommand(1013, 0)  # Transport: Record
             return {
                 "success": True,
                 "track_index": track_index,
+                "armed": armed,
                 "message": "Recording started. Call stop_transport to stop.",
             }
         except Exception as e:
@@ -108,20 +114,28 @@ def register_tools(mcp):
             item = track.items[item_index]
 
             if start_trim > 0:
-                item.position += start_trim
-                item.length -= start_trim
                 take = item.active_take
                 if take:
-                    take.start_offset += start_trim
+                    # Source offset is measured in source time, which runs at
+                    # the take's playback rate.
+                    rate = RPR.GetMediaItemTakeInfo_Value(take.id, "D_PLAYRATE") or 1.0
+                    offset = RPR.GetMediaItemTakeInfo_Value(take.id, "D_STARTOFFS")
+                    RPR.SetMediaItemTakeInfo_Value(
+                        take.id, "D_STARTOFFS", offset + start_trim * rate
+                    )
+                item.position += start_trim
+                item.length -= start_trim
 
             if end_trim > 0:
                 item.length -= end_trim
 
+            # reapy's Item has no fade properties (assigning one is a silent
+            # no-op), so write the item's D_FADEINLEN / D_FADEOUTLEN directly.
             if fade_in > 0:
-                item.fade_in_length = fade_in
+                RPR.SetMediaItemInfo_Value(item.id, "D_FADEINLEN", fade_in)
 
             if fade_out > 0:
-                item.fade_out_length = fade_out
+                RPR.SetMediaItemInfo_Value(item.id, "D_FADEOUTLEN", fade_out)
 
             return {
                 "success": True,
@@ -129,6 +143,8 @@ def register_tools(mcp):
                 "item_index": item_index,
                 "position": item.position,
                 "length": item.length,
+                "fade_in": RPR.GetMediaItemInfo_Value(item.id, "D_FADEINLEN"),
+                "fade_out": RPR.GetMediaItemInfo_Value(item.id, "D_FADEOUTLEN"),
             }
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -141,30 +157,52 @@ def register_tools(mcp):
             track = project.tracks[track_index]
             item = track.items[item_index]
             take = item.active_take
-            take.pitch = semitones
+            # reapy's Take has no `pitch` attribute; write D_PITCH directly.
+            RPR.SetMediaItemTakeInfo_Value(take.id, "D_PITCH", semitones)
             return {
                 "success": True,
                 "track_index": track_index,
                 "item_index": item_index,
-                "pitch_semitones": take.pitch,
+                "pitch_semitones": RPR.GetMediaItemTakeInfo_Value(take.id, "D_PITCH"),
             }
         except Exception as e:
             return {"success": False, "error": str(e)}
 
     @mcp.tool()
-    def adjust_playback_rate(track_index: int, item_index: int, rate: float) -> dict:
-        """Adjust playback rate of an audio item. 1.0 = normal speed, 0.5 = half speed."""
+    def adjust_playback_rate(
+        track_index: int,
+        item_index: int,
+        rate: float,
+        preserve_pitch: bool = True,
+        adjust_length: bool = True,
+    ) -> dict:
+        """
+        Adjust playback rate of an audio item. 1.0 = normal speed, 0.5 = half speed.
+        preserve_pitch: time-stretch (True) or tape-style speed change that also
+          shifts pitch (False).
+        adjust_length: resize the item so it still covers the same source audio,
+          as REAPER's item properties dialog does. With False the item keeps its
+          length and plays a different stretch of the source.
+        """
         try:
+            if rate <= 0:
+                return {"success": False, "error": f"rate must be > 0, got {rate}"}
             project = get_project()
             track = project.tracks[track_index]
             item = track.items[item_index]
             take = item.active_take
-            take.playback_rate = rate
+            old_rate = RPR.GetMediaItemTakeInfo_Value(take.id, "D_PLAYRATE") or 1.0
+            RPR.SetMediaItemTakeInfo_Value(take.id, "D_PLAYRATE", rate)
+            RPR.SetMediaItemTakeInfo_Value(take.id, "B_PPITCH", 1 if preserve_pitch else 0)
+            if adjust_length:
+                item.length = item.length * old_rate / rate
             return {
                 "success": True,
                 "track_index": track_index,
                 "item_index": item_index,
-                "playback_rate": take.playback_rate,
+                "playback_rate": RPR.GetMediaItemTakeInfo_Value(take.id, "D_PLAYRATE"),
+                "preserve_pitch": preserve_pitch,
+                "length": item.length,
             }
         except Exception as e:
             return {"success": False, "error": str(e)}

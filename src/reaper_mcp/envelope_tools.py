@@ -3,7 +3,7 @@ import logging
 import reapy
 from reapy import reascript_api as RPR
 
-from reaper_mcp.connection import get_project
+from reaper_mcp.connection import get_project, is_valid_pointer
 
 logger = logging.getLogger("reaper_mcp.envelope_tools")
 
@@ -21,18 +21,62 @@ def _get_fx_envelope(track, fx_index: int, param_index: int, create: bool):
 
 
 def _list_regions(project):
-    """Return all project regions as [{name, start, end}], in project order."""
-    n_markers = RPR.CountProjectMarkers(project.id, 0, 0)[2]
-    n_regions = RPR.CountProjectMarkers(project.id, 0, 0)[3]
+    """Return all project regions as [{name, start, end}], in project order.
+
+    NOTE: EnumProjectMarkers2's nameOut is a *string* out-parameter. It must be
+    passed as "" (a string buffer), not 0 -- passing an int makes ReaScript hand
+    the 0 straight back instead of the region name, so every region reads as 0.
+    The numeric out-params (isrgn/pos/rgnend) are fine as 0.
+    """
+    # CountProjectMarkers returns (retval, proj, n_markers, n_regions) -- one
+    # call gives both counts.
+    count_result = RPR.CountProjectMarkers(project.id, 0, 0)
+    n_markers, n_regions = count_result[2], count_result[3]
     total = n_markers + n_regions
     regions = []
     for i in range(total):
-        result = RPR.EnumProjectMarkers2(project.id, i, 0, 0, 0, 0, 0)
+        result = RPR.EnumProjectMarkers2(project.id, i, 0, 0, 0, "", 0)
         retval, isrgn, pos, rgnend, name = result[0], result[3], result[4], result[5], result[6]
         if retval and isrgn:
             regions.append({"name": name, "start": pos, "end": rgnend})
     regions.sort(key=lambda r: r["start"])
     return regions
+
+
+def _normalize_points(track, fx_index: int, param_index: int, points: list, normalized: bool):
+    """Return (points in 0-1 units, warning-or-None) ready to write to an FX envelope.
+
+    FX parameter envelopes store *normalized* 0-1 values. With ``normalized=False``
+    the caller's values are converted using the parameter's own min/max from
+    ``TrackFX_GetParam``. (Do not use ``fx.params[i].range`` for this: reapy's
+    normalized parameter reports a constant (0, 1).) Plugins that only expose
+    normalized parameters, such as VST3, also report (0, 1), so the conversion
+    is a no-op there and a warning says so. Out-of-range values raise
+    ``ValueError`` rather than being silently clamped by REAPER.
+    """
+    warning = None
+    if not normalized:
+        raw = RPR.TrackFX_GetParam(track.id, fx_index, param_index, 0, 0)
+        lo, hi = raw[4], raw[5]
+        span = hi - lo
+        if (lo, hi) == (0.0, 1.0):
+            warning = (
+                "This parameter reports a 0-1 range, so normalized=False changed "
+                "nothing. Plugins that only expose normalized values (e.g. VST3) "
+                "need normalized values; check formatted_value in get_fx_parameters."
+            )
+        points = [
+            {"position": p["position"], "value": (p["value"] - lo) / span if span else 0.0}
+            for p in points
+        ]
+    eps = 1e-9  # tolerate float rounding from the min/max conversion
+    bad = [p["value"] for p in points if not -eps <= p["value"] <= 1.0 + eps]
+    if bad:
+        raise ValueError(
+            f"Values {bad} fall outside the parameter's range once normalized (must be 0.0-1.0)"
+        )
+    points = [{**p, "value": min(1.0, max(0.0, p["value"]))} for p in points]
+    return points, warning
 
 
 def _insert_step_points(envelope, points: list, shape: int, clear_existing: bool):
@@ -73,7 +117,7 @@ def register_tools(mcp):
             project = get_project()
             track = project.tracks[track_index]
             envelope = _get_fx_envelope(track, fx_index, param_index, create=False)
-            if not envelope:
+            if not is_valid_pointer(envelope):
                 return {
                     "success": True,
                     "exists": False,
@@ -100,7 +144,7 @@ def register_tools(mcp):
             project = get_project()
             track = project.tracks[track_index]
             envelope = _get_fx_envelope(track, fx_index, param_index, create=False)
-            if not envelope:
+            if not is_valid_pointer(envelope):
                 return {"success": True, "cleared": False, "reason": "no envelope exists"}
             RPR.DeleteEnvelopePointRange(envelope, -1e9, 1e9)
             return {"success": True, "cleared": True}
@@ -134,25 +178,22 @@ def register_tools(mcp):
                 return {"success": False, "error": "points must be a non-empty list"}
             project = get_project()
             track = project.tracks[track_index]
+            # Validate before touching REAPER: creating the envelope is a side effect.
+            points, warning = _normalize_points(track, fx_index, param_index, points, normalized)
             envelope = _get_fx_envelope(track, fx_index, param_index, create=True)
-            if not envelope:
+            if not is_valid_pointer(envelope):
                 return {"success": False, "error": "Could not get or create envelope for this FX parameter"}
-            if not normalized:
-                fx = track.fxs[fx_index]
-                lo, hi = fx.params[param_index].range
-                span = hi - lo
-                points = [
-                    {"position": p["position"], "value": (p["value"] - lo) / span if span else 0.0}
-                    for p in points
-                ]
             applied = _insert_step_points(envelope, points, SHAPE_SQUARE, clear_existing)
-            return {
+            result = {
                 "success": True,
                 "track_index": track_index,
                 "fx_index": fx_index,
                 "param_index": param_index,
                 "points_written": applied,
             }
+            if warning:
+                result["warning"] = warning
+            return result
         except Exception as e:
             return {"success": False, "error": str(e)}
 
@@ -196,19 +237,12 @@ def register_tools(mcp):
                     "error": "No project regions matched the given names",
                     "available_regions": [r["name"] for r in regions],
                 }
+            points, warning = _normalize_points(track, fx_index, param_index, points, normalized)
             envelope = _get_fx_envelope(track, fx_index, param_index, create=True)
-            if not envelope:
+            if not is_valid_pointer(envelope):
                 return {"success": False, "error": "Could not get or create envelope for this FX parameter"}
-            if not normalized:
-                fx = track.fxs[fx_index]
-                lo, hi = fx.params[param_index].range
-                span = hi - lo
-                points = [
-                    {"position": p["position"], "value": (p["value"] - lo) / span if span else 0.0}
-                    for p in points
-                ]
             applied = _insert_step_points(envelope, points, SHAPE_SQUARE, clear_existing)
-            return {
+            result = {
                 "success": True,
                 "track_index": track_index,
                 "fx_index": fx_index,
@@ -217,5 +251,8 @@ def register_tools(mcp):
                 "matched_regions": matched,
                 "unmatched_names": sorted(unmatched_names),
             }
+            if warning:
+                result["warning"] = warning
+            return result
         except Exception as e:
             return {"success": False, "error": str(e)}

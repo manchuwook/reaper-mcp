@@ -16,6 +16,7 @@ Tests are written Given / When / Then; the expected ReaScript calls come from
 REAPER's own API documentation.
 """
 
+import contextlib
 import importlib
 import sys
 import types
@@ -27,7 +28,11 @@ _rpr = MagicMock(name="RPR")
 _reapy = types.ModuleType("reapy")
 _reapy.reascript_api = _rpr
 _reapy.Project = MagicMock(name="Project")
-_reapy.connect = lambda: None
+_reapy.connect = MagicMock(name="connect")
+_reapy.reconnect = MagicMock(name="reconnect")
+# inside_reaper() batches socket round trips; here it is a no-op context that
+# records its use, so tests can assert a tool batches its reads.
+_reapy.inside_reaper = MagicMock(name="inside_reaper", side_effect=lambda: contextlib.nullcontext())
 sys.modules["reapy"] = _reapy
 sys.modules["reapy.reascript_api"] = _rpr
 
@@ -130,3 +135,10 @@ def track_info(rpr):
 
     rpr.SetMediaTrackInfo_Value.side_effect = set_value
     return store
+
+
+@pytest.fixture
+def inside_reaper():
+    """The fake ``reapy.inside_reaper`` with its call history cleared."""
+    _reapy.inside_reaper.reset_mock()
+    return _reapy.inside_reaper

@@ -135,39 +135,40 @@ def register_tools(mcp):
             project = get_project()
             track = project.tracks[track_index]
             fx = track.fxs[fx_index]
-            n_params = fx.n_params
-            needle = name_filter.lower()
+            with reapy.inside_reaper():
+                n_params = fx.n_params
+                needle = name_filter.lower()
 
-            params = []
-            matched = 0
-            for i in range(n_params):
-                name = _param_name(track, fx_index, param_index=i)
-                if needle and needle not in name.lower():
-                    continue
-                matched += 1
-                if matched <= offset:
-                    continue
-                # TrackFX_GetParam returns (value, proj, fx, param, min, max) --
-                # the raw value in the parameter's own units plus its range.
-                raw_result = RPR.TrackFX_GetParam(track.id, fx_index, i, 0, 0)
-                raw_value, param_min, param_max = (
-                    raw_result[0],
-                    raw_result[4],
-                    raw_result[5],
-                )
-                params.append({
-                    "index": i,
-                    "name": name,
-                    "normalized_value": RPR.TrackFX_GetParamNormalized(
-                        track.id, fx_index, i
-                    ),
-                    "raw_value": raw_value,
-                    "min": param_min,
-                    "max": param_max,
-                    "formatted_value": _param_formatted(track, fx_index, i),
-                })
-                if limit and len(params) >= limit:
-                    break
+                params = []
+                matched = 0
+                for i in range(n_params):
+                    name = _param_name(track, fx_index, param_index=i)
+                    if needle and needle not in name.lower():
+                        continue
+                    matched += 1
+                    if matched <= offset:
+                        continue
+                    # TrackFX_GetParam returns (value, proj, fx, param, min, max) --
+                    # the raw value in the parameter's own units plus its range.
+                    raw_result = RPR.TrackFX_GetParam(track.id, fx_index, i, 0, 0)
+                    raw_value, param_min, param_max = (
+                        raw_result[0],
+                        raw_result[4],
+                        raw_result[5],
+                    )
+                    params.append({
+                        "index": i,
+                        "name": name,
+                        "normalized_value": RPR.TrackFX_GetParamNormalized(
+                            track.id, fx_index, i
+                        ),
+                        "raw_value": raw_value,
+                        "min": param_min,
+                        "max": param_max,
+                        "formatted_value": _param_formatted(track, fx_index, i),
+                    })
+                    if limit and len(params) >= limit:
+                        break
 
             return {
                 "success": True,
@@ -188,15 +189,16 @@ def register_tools(mcp):
         try:
             project = get_project()
             track = project.tracks[track_index]
-            fx_list = []
-            for i in range(track.n_fxs):
-                fx = track.fxs[i]
-                fx_list.append({
-                    "index": i,
-                    "name": fx.name,
-                    "enabled": fx.is_enabled,
-                    "n_params": fx.n_params,
-                })
+            with reapy.inside_reaper():
+                fx_list = []
+                for i in range(track.n_fxs):
+                    fx = track.fxs[i]
+                    fx_list.append({
+                        "index": i,
+                        "name": fx.name,
+                        "enabled": fx.is_enabled,
+                        "n_params": fx.n_params,
+                    })
             return {"success": True, "track_index": track_index, "fx": fx_list}
         except Exception as e:
             return {"success": False, "error": str(e)}

@@ -144,8 +144,11 @@ class TestAudioItems:
 
 
 @pytest.fixture
-def midi_item(make_project):
+def midi_item(make_project, rpr):
     project = make_project(n_tracks=1, bpm=120.0)
+    # Constant 120 bpm tempo map: 2 quarter notes per second.
+    rpr.TimeMap2_timeToQN.side_effect = lambda proj, t: t * 2.0
+    rpr.TimeMap2_QNToTime.side_effect = lambda proj, qn: qn / 2.0
     item, take = MagicMock(name="item"), MagicMock(name="take")
     item.id, item.position, item.active_take = "(MediaItem*)0x1", 10.0, take
     take.is_midi = True
@@ -156,11 +159,12 @@ def midi_item(make_project):
 
 
 class TestMidiTiming:
-    def test_note_start_is_shifted_by_the_items_position(self, register, midi_item):
+    def test_note_start_is_item_relative(self, register, midi_item):
         project, item, take = midi_item
         register("midi_tools", project)["add_midi_note"](0, 0, pitch=60, start=1.0, length=0.5)
-        # Take.add_note takes *project* time; the item sits at 10 s.
-        take.add_note.assert_called_once_with(start=11.0, end=11.5, pitch=60, velocity=100, channel=0)
+        # reapy's Take.add_note takes *item-relative* time and adds the item's
+        # position (10 s here) itself, so the tool must not add it a second time.
+        take.add_note.assert_called_once_with(start=1.0, end=1.5, pitch=60, velocity=100, channel=0)
 
     def test_chords_land_at_the_requested_start_position(self, register, midi_item):
         project, item, take = midi_item
@@ -168,7 +172,8 @@ class TestMidiTiming:
             0, "C,G", start_position=8.0, beats_per_chord=4
         )
         starts = sorted({c.kwargs["start"] for c in take.add_note.call_args_list})
-        assert starts == [8.0, 10.0]  # 120 bpm -> a 4-beat chord is 2 s
+        assert starts == [0.0, 2.0]  # item-relative; 120 bpm -> a 4-beat chord is 2 s
+        # the result still reports where each chord sits on the project timeline
         assert [c["position"] for c in result["chords"]] == [8.0, 10.0]
 
     def test_drum_steps_land_at_the_requested_start_position(self, register, midi_item):
@@ -177,7 +182,49 @@ class TestMidiTiming:
             0, "k...", start_position=6.0, beats=4, repeats=2
         )
         starts = [c.kwargs["start"] for c in take.add_note.call_args_list]
-        assert starts == [6.0, 8.0]  # one kick per 2 s bar, offset by the 6 s start
+        assert starts == [0.0, 2.0]  # item-relative: one kick per 2 s bar
+
+    def test_chords_follow_a_tempo_change(self, register, rpr, midi_item):
+        # 120 bpm for the first 4 s (8 quarter notes), then 60 bpm.
+        rpr.TimeMap2_timeToQN.side_effect = lambda p, t: t * 2.0 if t <= 4.0 else 8.0 + (t - 4.0)
+        rpr.TimeMap2_QNToTime.side_effect = lambda p, qn: qn / 2.0 if qn <= 8.0 else 4.0 + (qn - 8.0)
+        project, item, take = midi_item
+        result = register("midi_tools", project)["create_chord_progression"](
+            0, "C,G,Am", start_position=0.0, beats_per_chord=4
+        )
+        # The third chord starts at quarter note 8, after the slowdown, so it is
+        # twice as long. 60 / bpm per beat would have given 2 s for all three.
+        assert [c["position"] for c in result["chords"]] == [0.0, 2.0, 4.0]
+        assert [c["length"] for c in result["chords"]] == [2.0, 2.0, 4.0]
+        assert result["total_length"] == 8.0
+        project.tracks[0].add_midi_item.assert_called_once_with(0.0, 8.0)
+
+    def test_notes_are_inserted_unsorted_and_sorted_once(self, register, midi_item):
+        project, item, take = midi_item
+        tools = register("midi_tools", project)
+        tools["create_chord_progression"](0, "C,G", start_position=0.0)
+        assert take.add_note.call_args_list  # something was written
+        assert all(c.kwargs["sort"] is False for c in take.add_note.call_args_list)
+        take.sort_events.assert_called_once_with()
+
+        take.reset_mock()
+        tools["create_drum_pattern"](0, "k.s.", start_position=0.0)
+        assert all(c.kwargs["sort"] is False for c in take.add_note.call_args_list)
+        take.sort_events.assert_called_once_with()
+
+    def test_chord_and_drum_tools_batch_their_reaper_calls(self, register, midi_item, inside_reaper):
+        project, _, _ = midi_item
+        tools = register("midi_tools", project)
+        tools["create_chord_progression"](0, "C", start_position=0.0)
+        tools["create_drum_pattern"](0, "k", start_position=0.0)
+        assert inside_reaper.call_count == 2
+
+    def test_non_positive_lengths_are_rejected(self, register, midi_item):
+        project, _, take = midi_item
+        tools = register("midi_tools", project)
+        assert tools["create_chord_progression"](0, "C", 0.0, beats_per_chord=0)["success"] is False
+        assert tools["create_drum_pattern"](0, "k", 0.0, beats=0)["success"] is False
+        take.add_note.assert_not_called()
 
     def test_an_empty_drum_pattern_is_rejected(self, register, midi_item):
         project, _, take = midi_item
@@ -421,3 +468,47 @@ def test_every_tool_module_registers_unique_tool_names(register):
         names.extend(register(module))
     assert len(names) == len(set(names)), "a tool name is registered twice"
     assert {"set_track_automation_mode", "set_track_folder_depth"} <= set(names)
+
+
+# ---------------------------------------------------------------------------
+# Batched reads: every reapy attribute access is a socket round trip, so the
+# read-heavy tools must run inside one reapy.inside_reaper() session.
+# ---------------------------------------------------------------------------
+
+
+class TestBatchedReads:
+    def test_list_tracks_batches_its_reads(self, register, make_project, inside_reaper):
+        project = make_project(n_tracks=2)
+        for track in project.tracks:
+            track.get_info_value.return_value = 1.0
+        result = register("track_tools", project)["list_tracks"]()
+        assert result["success"] and result["count"] == 2
+        inside_reaper.assert_called_once_with()
+
+    def test_get_track_info_batches_its_reads(self, register, make_project, inside_reaper):
+        project = make_project(n_tracks=1)
+        track = project.tracks[0]
+        track.get_info_value.return_value = 1.0
+        track.n_fxs, track.n_items = 0, 0
+        result = register("track_tools", project)["get_track_info"](0)
+        assert result["success"]
+        inside_reaper.assert_called_once_with()
+
+    def test_get_fx_parameters_filters_by_name_inside_one_batch(
+        self, register, rpr, make_project, inside_reaper
+    ):
+        project = make_project(n_tracks=1)
+        fx = MagicMock(name="fx")
+        fx.n_params, fx.name = 3, "Kontakt"
+        project.tracks[0].fxs = [fx]
+        names = ["Volume", "Program", "Pan"]
+        rpr.TrackFX_GetParamName.side_effect = lambda tid, f, p, buf, sz: ("ok", tid, f, p, names[p])
+        rpr.TrackFX_GetParam.return_value = (0.5, "t", 0, 0, 0.0, 1.0)
+        rpr.TrackFX_GetParamNormalized.return_value = 0.5
+        rpr.TrackFX_GetFormattedParamValue.return_value = ("ok", "t", 0, 0, "50", 512)
+
+        result = register("fx_tools", project)["get_fx_parameters"](0, 0, name_filter="prog")
+
+        assert result["n_matched"] == 1
+        assert [(p["index"], p["name"]) for p in result["parameters"]] == [(1, "Program")]
+        inside_reaper.assert_called_once_with()

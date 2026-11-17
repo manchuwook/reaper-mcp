@@ -195,22 +195,29 @@ def register_tools(mcp):
             project = get_project()
             track = project.tracks[track_index]
 
-            fx_list = []
-            for i in range(track.n_fxs):
-                fx = track.fxs[i]
-                fx_list.append({"index": i, "name": fx.name, "enabled": fx.is_enabled})
+            with reapy.inside_reaper():
+                fx_list = []
+                for i in range(track.n_fxs):
+                    fx = track.fxs[i]
+                    fx_list.append({"index": i, "name": fx.name, "enabled": fx.is_enabled})
 
-            items = []
-            for i in range(track.n_items):
-                item = track.items[i]
-                items.append({
-                    "index": i,
-                    "position": item.position,
-                    "length": item.length,
-                    "name": item.name,
-                })
+                items = []
+                for i in range(track.n_items):
+                    item = track.items[i]
+                    # reapy's Item has no .name attribute; the name lives on the active take.
+                    try:
+                        take = item.active_take
+                        item_name = take.name if take is not None else ""
+                    except Exception:
+                        item_name = ""
+                    items.append({
+                        "index": i,
+                        "position": item.position,
+                        "length": item.length,
+                        "name": item_name,
+                    })
 
-            info = _track_summary(track, track_index)
+                info = _track_summary(track, track_index)
             info.update({
                 "success": True,
                 "track_index": track_index,
@@ -227,10 +234,11 @@ def register_tools(mcp):
         """List all tracks in the current project with their basic parameters."""
         try:
             project = get_project()
-            tracks = [
-                _track_summary(project.tracks[i], i)
-                for i in range(project.n_tracks)
-            ]
+            with reapy.inside_reaper():
+                tracks = [
+                    _track_summary(project.tracks[i], i)
+                    for i in range(project.n_tracks)
+                ]
             return {"success": True, "count": len(tracks), "tracks": tracks}
         except Exception as e:
             logger.error(f"list_tracks failed: {e}")

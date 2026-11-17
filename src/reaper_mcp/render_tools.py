@@ -12,9 +12,12 @@ How REAPER's render settings work (ReaScript ``GetSetProjectInfo*``)
   silently ignored.
 * ``RENDER_BOUNDSFLAG``: 0 = custom range (``RENDER_STARTPOS``/``RENDER_ENDPOS``),
   1 = entire project, 2 = time selection, 3 = all regions, ...
-* ``RENDER_SETTINGS``: bits select the *source*. 0 = master mix, 2 = stems only
-  (one file per **selected** track). See the REAPER User Guide, section 21.5
-  "Render to File: Source Options".
+* ``RENDER_SETTINGS``: bits select the *source*. 0 = master mix, 2 = stems only,
+  128 = selected tracks via master (one file per **selected** track). See the
+  REAPER User Guide, section 21.5 "Render to File: Source Options".
+  Stems use 128: tested live on REAPER 7.x, 1, 2 and 3 all rendered only the
+  master mix through ``Main_OnCommand(41824)``, while 128 produced one file per
+  selected track. "Via master" means master-bus FX and volume apply to each stem.
 
 Render settings live in the project file, so every render here snapshots the
 settings it touches and restores them afterwards: a tool call must not leave the
@@ -52,7 +55,8 @@ BOUNDS_TIME_SELECTION = 2
 
 # --- RENDER_SETTINGS values (source) ----------------------------------------
 SOURCE_MASTER_MIX = 0
-SOURCE_STEMS_ONLY = 2  # one file per selected track
+SOURCE_STEMS_ONLY = 2  # documented, but ignored by action 41824 in live tests
+SOURCE_SELECTED_TRACKS_VIA_MASTER = 128  # one file per selected track, through the master bus
 
 #: Four-character sink codes for ``RENDER_FORMAT``.
 SINK_CODES = {
@@ -279,18 +283,16 @@ def register_tools(mcp):
         sample_rate: int = 48000,
         bit_depth: int = 24,
         overwrite: bool = False,
-        source_override: int = None,
     ) -> dict:
         """
         Render each track as a separate stem file, named after the track.
 
-        Uses REAPER's own "Stems (selected tracks)" render source (post-FX,
-        post-fader, with anything routed into the track included), so folders and
-        sends behave exactly as in the Render dialog.
+        Uses REAPER's "Selected tracks via master" render source: each selected
+        track (with its FX, fader and anything routed into it) is rendered through
+        the master bus, so master FX and master volume apply to every stem.
         track_indices: tracks to render, or null for all tracks.
         The tracks' selection and the project's render settings are restored afterwards.
         overwrite: replace stem files that already exist in output_directory.
-        source_override: raw RENDER_SETTINGS value (diagnostic; default stems-only).
         """
         project = None
         previously_selected = []
@@ -340,16 +342,8 @@ def register_tools(mcp):
             with preserved_render_settings():
                 _configure(
                     output_directory, "$track", format, sample_rate, bit_depth, 2,
-                    BOUNDS_ENTIRE_PROJECT, source=SOURCE_STEMS_ONLY if source_override is None else int(source_override),
+                    BOUNDS_ENTIRE_PROJECT, source=SOURCE_SELECTED_TRACKS_VIA_MASTER,
                 )
-                debug = {
-                    "render_settings": RPR.GetSetProjectInfo(0, "RENDER_SETTINGS", 0.0, False),
-                    "selected_tracks": [
-                        j for j in range(project.n_tracks)
-                        if RPR.GetMediaTrackInfo_Value(project.tracks[j].id, "I_SELECTED")
-                    ],
-                    "count_selected": RPR.CountSelectedTracks(0),
-                }
                 _run_render()
 
             produced = sorted(
@@ -375,7 +369,6 @@ def register_tools(mcp):
                 "output_directory": output_directory,
                 "stems": stems,
                 "files": produced,
-                "debug": debug,
             }
         except Exception as e:
             logger.error(f"render_stems failed: {e}")

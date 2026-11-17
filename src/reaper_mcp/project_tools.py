@@ -7,6 +7,7 @@ import reapy
 from reapy import reascript_api as RPR
 
 from reaper_mcp.connection import get_project
+from reaper_mcp.regions import add_region, list_markers, list_regions
 from reaper_mcp.timing import format_time_signature, set_time_signature as _set_time_signature
 
 logger = logging.getLogger("reaper_mcp.project_tools")
@@ -125,21 +126,10 @@ def register_tools(mcp):
         """Get information about the current project: name, path, tempo, tracks, length."""
         try:
             project = get_project()
-            markers = []
-            try:
-                for i in range(project.n_markers):
-                    m = project.markers[i]
-                    markers.append({"index": i, "name": m.name, "position": m.position})
-            except Exception:
-                pass
-
-            regions = []
-            try:
-                for i in range(project.n_regions):
-                    r = project.regions[i]
-                    regions.append({"index": i, "name": r.name, "start": r.start, "end": r.end})
-            except Exception:
-                pass
+            # No try/except here on purpose: this used to swallow every failure and
+            # report empty markers/regions for projects that had them.
+            regions = [{"index": i, **r} for i, r in enumerate(list_regions(project))]
+            markers = [{"index": i, **m} for i, m in enumerate(list_markers(project))]
 
             return {
                 "success": True,
@@ -154,6 +144,50 @@ def register_tools(mcp):
             }
         except Exception as e:
             logger.error(f"get_project_info failed: {e}")
+            return {"success": False, "error": str(e)}
+
+    @mcp.tool()
+    def create_regions_from_items(
+        track_index: int, name_prefix: str = "", skip_existing: bool = True
+    ) -> dict:
+        """
+        Create one project region per item on a track, spanning each item and named
+        after its active take (falling back to "Item N"). Handy for turning a song
+        structure track (Intro, Verse 1, Chorus ...) into regions, which
+        set_fx_param_step_automation_by_region needs to find sections by name.
+
+        name_prefix is prepended to every region name.
+        skip_existing: leave out a region whose name and start already exist, so
+        running this twice does not stack duplicate regions.
+        """
+        try:
+            project = get_project()
+            track = project.tracks[track_index]
+            created, skipped = [], []
+            with reapy.inside_reaper():
+                existing = {(r["name"], round(r["start"], 6)) for r in list_regions(project)}
+                for i in range(track.n_items):
+                    item = track.items[i]
+                    take = item.active_take
+                    base = (take.name if take is not None else "") or f"Item {i + 1}"
+                    name = f"{name_prefix}{base}"
+                    start = item.position
+                    end = start + item.length
+                    if skip_existing and (name, round(start, 6)) in existing:
+                        skipped.append(name)
+                        continue
+                    add_region(project, name, start, end)
+                    created.append({"name": name, "start": start, "end": end})
+                if created:
+                    RPR.UpdateTimeline()
+            return {
+                "success": True,
+                "track_index": track_index,
+                "created": created,
+                "skipped_existing": skipped,
+            }
+        except Exception as e:
+            logger.error(f"create_regions_from_items failed: {e}")
             return {"success": False, "error": str(e)}
 
     @mcp.tool()

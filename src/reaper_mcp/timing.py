@@ -71,3 +71,17 @@ def set_time_signature(project, numerator: int, denominator: int) -> None:
     if not ok:
         raise RuntimeError("REAPER rejected the time-signature marker")
     RPR.UpdateTimeline()
+
+
+def qn_at(project, seconds: float) -> float:
+    """Project time (seconds) -> quarter notes, following the tempo map."""
+    return float(RPR.TimeMap2_timeToQN(project.id, seconds))
+
+
+def seconds_at_qn(project, qn: float) -> float:
+    """Quarter notes -> project time (seconds), following the tempo map.
+
+    ``60 / bpm`` per beat is only right while the tempo never changes; this
+    stays correct across tempo markers and envelopes.
+    """
+    return float(RPR.TimeMap2_QNToTime(project.id, qn))

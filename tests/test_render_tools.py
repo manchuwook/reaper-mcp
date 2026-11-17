@@ -190,14 +190,14 @@ class TestRenderStems:
         tools = register("render_tools", project)
         return tools, project, track_info, selection_during, tmp_path
 
-    def test_uses_reapers_stems_source_for_just_the_requested_tracks(self, setup, renderer):
+    def test_renders_just_the_requested_tracks_via_master(self, setup, renderer):
         tools, project, _, selection_during, tmp_path = setup
 
         result = tools["render_stems"](str(tmp_path / "stems"), track_indices=[0, 1])
 
         assert result["success"] is True
         numeric, strings = renderer.during
-        assert numeric["RENDER_SETTINGS"] == 2.0  # stems only
+        assert numeric["RENDER_SETTINGS"] == 128.0  # selected tracks via master
         assert strings["RENDER_PATTERN"] == "$track"
         assert selection_during["names"] == ["Kick", "Lead Guitar"]
         assert [s["track_name"] for s in result["stems"] if s["exists"]] == ["Kick", "Lead Guitar"]

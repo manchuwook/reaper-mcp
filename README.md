@@ -1,6 +1,6 @@
 # REAPER MCP Server
 
-A Model Context Protocol (MCP) server that enables AI agents to control REAPER DAW — 65 tools covering project management, tracks, MIDI, FX, mixing, automation, mastering, rendering, and audio analysis.
+A Model Context Protocol (MCP) server that enables AI agents to control REAPER DAW — 70 tools covering project management, tracks, MIDI, FX, mixing, automation, mastering, rendering, and audio analysis.
 
 ## Requirements
 
@@ -65,10 +65,10 @@ reaper-mcp-server          # start the server
 reaper-mcp-server --debug  # with debug logging
 ```
 
-## Tools (65)
+## Tools (66)
 
 ### Project Management
-`create_project` `load_project` `save_project` `get_project_info` `set_tempo` `set_time_signature` `set_cursor_position` `play_project` `stop_transport`
+`create_project` `load_project` `create_regions_from_items` `save_project` `get_project_info` `set_tempo` `set_time_signature` `set_cursor_position` `play_project` `stop_transport`
 
 ### Tracks
 `create_track` `delete_track` `rename_track` `list_tracks` `get_track_info` `set_track_color` `set_track_folder_depth`
@@ -77,7 +77,7 @@ reaper-mcp-server --debug  # with debug logging
 `create_bus` `create_send` `remove_send` `list_sends` `set_send_volume`
 
 ### MIDI
-`create_midi_item` `add_midi_note` `create_chord_progression` `create_drum_pattern`
+`insert_midi_file` `create_midi_item` `add_midi_note` `create_chord_progression` `create_drum_pattern`
 
 ### FX & Instruments
 `add_fx` `remove_fx` `bypass_fx` `list_track_fx` `get_fx_parameters` `set_fx_parameter` `load_fx_preset` `add_master_fx` `list_master_fx` `set_master_fx_parameter`
@@ -105,8 +105,10 @@ reaper-mcp-server --debug  # with debug logging
 - **Render settings are restored.** REAPER stores render settings in the project, so every render tool
   snapshots them, renders, and puts them back. During a render, normalisation and "add rendered files to
   project" are switched off. Existing output files are never overwritten unless you pass `overwrite=True`.
-- **Stems use REAPER's own "Stems (selected tracks)" source**, so folders, sends and FX behave as they do in
-  the Render dialog (User Guide 21.5). Track selection is restored afterwards.
+- **Stems use REAPER's "Selected tracks via master" source** (`RENDER_SETTINGS=128`, User Guide 21.5): one file
+  per track, named after it, including the track's FX, fader and anything routed into it. Master-bus FX and
+  volume apply to every stem, so bypass a master limiter first if you want raw stems. The "Stems only" source
+  (`2`) was tested live and REAPER rendered just the master mix. Track selection is restored afterwards.
 - **`load_project` won't hang on a "Save changes?" prompt.** It refuses if the current project has unsaved
   changes, unless you call `save_project` first or pass `discard_unsaved=True`.
 - **`create_bus` builds a submix by default** (the sources' direct master sends are turned off, User Guide
@@ -116,8 +118,12 @@ reaper-mcp-server --debug  # with debug logging
 - **Automation points need a playing automation mode.** Use `set_track_automation_mode` (`read`, `touch` or
   `latch`); in `write` mode REAPER records over the points the tools insert.
 - **MIDI positions** (`start`, `start_position`) are seconds. `add_midi_note` start is relative to the item;
-  chord and drum tools use absolute project time and compute beat lengths from the project tempo, so they
-  assume a constant tempo.
+  chord and drum tools use absolute project time and convert beats (quarter notes) to seconds through
+  REAPER's tempo map, so tempo changes are honoured.
+- **`insert_midi_file`** drops a whole `.mid` (a path, or drummer-library's `midiBase64`) onto a track at a
+  `bar`, a `position`, or after the track's last item. The notes keep their quarter-note positions and follow
+  the project tempo, whatever tempo the file was written at; the MIDI is stored in-project and the project's
+  tempo map is never touched. Decoded base64 files go to `<project media folder>/MIDI Imports/`.
 
 ## Development
 

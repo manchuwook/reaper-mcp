@@ -1,17 +1,45 @@
 import logging
 import reapy
+from reapy import reascript_api as RPR
 
 logger = logging.getLogger("reaper_mcp.connection")
 
 _connected = False
 
 
-def ensure_connected() -> None:
-    global _connected
-    if _connected:
-        return
+def _is_alive() -> bool:
+    """Cheap round trip that tells a live socket from one REAPER dropped.
+
+    reapy holds one socket for the life of the process. If REAPER is restarted
+    (or the distant API server stops) that socket is dead, and every later call
+    fails until the MCP server itself is restarted -- unless we notice and
+    reconnect.
+    """
     try:
-        reapy.connect()
+        RPR.GetAppVersion()
+        return True
+    except Exception:
+        return False
+
+
+def ensure_connected() -> None:
+    """Connect to REAPER, reconnecting if an earlier connection has gone away."""
+    global _connected
+    reconnecting = _connected
+    if _connected:
+        if _is_alive():
+            return
+        logger.warning("Lost connection to REAPER; reconnecting")
+        _connected = False
+    try:
+        # reapy.reconnect() discards the dead client and regenerates the API
+        # proxy functions; plain connect() is only right for the first attempt.
+        if reconnecting and hasattr(reapy, "reconnect"):
+            reapy.reconnect()
+        else:
+            reapy.connect()
+        if reconnecting and not _is_alive():
+            raise RuntimeError("REAPER did not answer after reconnecting")
         _connected = True
         logger.info("Connected to REAPER")
     except Exception as e:

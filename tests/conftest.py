@@ -138,6 +138,44 @@ def track_info(rpr):
 
 
 @pytest.fixture
+def project_markers(rpr):
+    """Back REAPER's per-marker API; returns ``set_entries(entries)``.
+
+    Each entry is ``(is_region, start, end, name, number)``. Only the API that
+    really returns names in REAPER 7.86 is backed with them:
+    ``GetNumRegionsOrMarkers`` / ``GetRegionOrMarker`` /
+    ``GetRegionOrMarkerInfo_Value`` / ``GetSetRegionOrMarkerInfo_String``.
+    The legacy ``EnumProjectMarkers*`` calls return ``""`` for every name, as
+    they do live, so a test cannot pass by reading names from them.
+    """
+    null = "(ProjectMarker*)0x0000000000000000"
+    keys = {"B_ISREGION": 0, "D_STARTPOS": 1, "D_ENDPOS": 2, "I_NUMBER": 4}
+
+    def set_entries(entries):
+        pointers = [f"(ProjectMarker*)0x{i + 1:x}" for i in range(len(entries))]
+        by_pointer = dict(zip(pointers, entries))
+        rpr.GetNumRegionsOrMarkers.side_effect = lambda proj: len(entries)
+        rpr.GetRegionOrMarker.side_effect = (
+            lambda proj, i, guid: pointers[i] if 0 <= i < len(pointers) else null
+        )
+        rpr.GetRegionOrMarkerInfo_Value.side_effect = (
+            lambda proj, m, key: float(by_pointer[m][keys[key]]) if key in keys else 0.0
+        )
+        rpr.GetSetRegionOrMarkerInfo_String.side_effect = (
+            lambda proj, m, key, value, is_set: (1, proj, m, key, by_pointer[m][3], is_set)
+        )
+        n_regions = sum(1 for e in entries if e[0])
+        rpr.CountProjectMarkers.return_value = (
+            len(entries), "p", len(entries) - n_regions, n_regions
+        )
+        rpr.EnumProjectMarkers2.side_effect = lambda proj, i, *rest: (
+            1, proj, i, entries[i][0], entries[i][1], entries[i][2], "", entries[i][4]
+        )
+
+    return set_entries
+
+
+@pytest.fixture
 def inside_reaper():
     """The fake ``reapy.inside_reaper`` with its call history cleared."""
     _reapy.inside_reaper.reset_mock()

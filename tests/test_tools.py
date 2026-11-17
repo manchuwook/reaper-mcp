@@ -323,13 +323,9 @@ class TestFxStepAutomation:
         rpr.GetFXEnvelope.assert_not_called()
         rpr.InsertEnvelopePoint.assert_not_called()
 
-    def test_region_automation_validates_and_converts_the_same_way(self, setup):
+    def test_region_automation_validates_and_converts_the_same_way(self, setup, project_markers):
         tools, rpr = setup
-        rpr.CountProjectMarkers.return_value = (2, "p", 0, 2)
-        regions = [("Verse", 0.0, 16.0), ("Chorus", 16.0, 32.0)]
-        rpr.EnumProjectMarkers2.side_effect = lambda proj, i, a, b, c, name, d: (
-            1, proj, i, 1, regions[i][1], regions[i][2], regions[i][0], i
-        )
+        project_markers([(True, 0.0, 16.0, "Verse", 1), (True, 16.0, 32.0, "Chorus", 2)])
         rpr.TrackFX_GetParam.return_value = (0, "t", 0, 0, 0.0, 4.0)
 
         result = tools["set_fx_param_step_automation_by_region"](

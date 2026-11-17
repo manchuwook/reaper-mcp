@@ -176,20 +176,13 @@ class TestLoadProject:
 from unittest.mock import MagicMock  # noqa: E402
 
 
-def _enumerate_markers(rpr, entries):
-    """Back CountProjectMarkers / EnumProjectMarkers2 with (is_region, pos, end, name, number)."""
-    n_regions = sum(1 for e in entries if e[0])
-    rpr.CountProjectMarkers.return_value = (len(entries), "p", len(entries) - n_regions, n_regions)
-    rpr.EnumProjectMarkers2.side_effect = lambda proj, i, *rest: (
-        1, proj, i, entries[i][0], entries[i][1], entries[i][2], entries[i][3], entries[i][4]
-    )
-
-
 class TestProjectInfoMarkersAndRegions:
-    def test_reports_the_regions_and_markers_that_exist(self, register, rpr, project):
+    def test_reports_the_regions_and_markers_that_exist(
+        self, register, rpr, project, project_markers
+    ):
         # Regression: get_project_info used to return "regions": [] for a project that
         # list_project_regions correctly showed regions for.
-        _enumerate_markers(rpr, [
+        project_markers([
             (False, 4.0, 4.0, "Drop", 1),
             (True, 8.0, 40.0, "Verse 1", 2),
             (True, 0.0, 8.0, "Intro", 1),
@@ -202,10 +195,32 @@ class TestProjectInfoMarkersAndRegions:
         assert info["markers"] == [{"index": 0, "number": 1, "name": "Drop", "position": 4.0}]
 
     def test_a_failing_read_is_reported_not_swallowed(self, register, rpr, project):
-        rpr.CountProjectMarkers.side_effect = RuntimeError("boom")
+        rpr.GetNumRegionsOrMarkers.side_effect = RuntimeError("boom")
         info = register("project_tools", project)["get_project_info"]()
         assert info["success"] is False
         assert "boom" in info["error"]
+
+    def test_names_come_from_the_per_marker_api_not_enum_project_markers(
+        self, register, rpr, project, project_markers
+    ):
+        # Live REAPER 7.86 returns "" for every name from EnumProjectMarkers*; a
+        # project whose ruler shows "Intro", "Verse 1" read as unnamed.
+        project_markers([(True, 0.0, 16.0, "Intro", 1), (False, 0.0, 0.0, "Intro", 1)])
+        info = register("project_tools", project)["get_project_info"]()
+        assert info["regions"][0]["name"] == "Intro"
+        assert info["markers"][0]["name"] == "Intro"
+        rpr.GetSetRegionOrMarkerInfo_String.assert_any_call(
+            project.id, "(ProjectMarker*)0x1", "P_NAME", "", False
+        )
+        rpr.EnumProjectMarkers2.assert_not_called()
+
+    def test_without_the_per_marker_api_positions_still_read(
+        self, register, rpr, project, project_markers
+    ):
+        project_markers([(True, 0.0, 16.0, "Intro", 1)])
+        rpr.GetNumRegionsOrMarkers.side_effect = AttributeError("GetNumRegionsOrMarkers")
+        info = register("project_tools", project)["get_project_info"]()
+        assert info["regions"] == [{"index": 0, "name": "", "start": 0.0, "end": 16.0}]
 
 
 def _item(position, length, take_name):
@@ -226,8 +241,8 @@ def song_parts(make_project):
 
 
 class TestCreateRegionsFromItems:
-    def test_creates_one_named_region_per_item(self, register, rpr, song_parts):
-        _enumerate_markers(rpr, [])
+    def test_creates_one_named_region_per_item(self, register, rpr, song_parts, project_markers):
+        project_markers([])
         rpr.AddRegionOrMarker.return_value = "(ProjectMarker*)0x2a"
         result = register("project_tools", song_parts)["create_regions_from_items"](0)
         assert [c["name"] for c in result["created"]] == ["Intro", "Verse 1"]
@@ -235,22 +250,22 @@ class TestCreateRegionsFromItems:
         rpr.AddRegionOrMarker.assert_any_call(pid, True, 0.0, 8.0, "Intro", -1, 0)
         rpr.AddRegionOrMarker.assert_any_call(pid, True, 8.0, 40.0, "Verse 1", -1, 0)
 
-    def test_name_prefix_is_applied(self, register, rpr, song_parts):
-        _enumerate_markers(rpr, [])
+    def test_name_prefix_is_applied(self, register, rpr, song_parts, project_markers):
+        project_markers([])
         rpr.AddRegionOrMarker.return_value = "(ProjectMarker*)0x2a"
         result = register("project_tools", song_parts)["create_regions_from_items"](0, name_prefix="Song A - ")
         assert result["created"][0]["name"] == "Song A - Intro"
 
-    def test_running_twice_does_not_stack_duplicates(self, register, rpr, song_parts):
-        _enumerate_markers(rpr, [(True, 0.0, 8.0, "Intro", 1)])
+    def test_running_twice_does_not_stack_duplicates(self, register, rpr, song_parts, project_markers):
+        project_markers([(True, 0.0, 8.0, "Intro", 1)])
         rpr.AddRegionOrMarker.return_value = "(ProjectMarker*)0x2a"
         result = register("project_tools", song_parts)["create_regions_from_items"](0)
         assert result["skipped_existing"] == ["Intro"]
         assert [c["name"] for c in result["created"]] == ["Verse 1"]
         assert rpr.AddRegionOrMarker.call_count == 1
 
-    def test_a_null_pointer_means_reaper_refused(self, register, rpr, song_parts):
-        _enumerate_markers(rpr, [])
+    def test_a_null_pointer_means_reaper_refused(self, register, rpr, song_parts, project_markers):
+        project_markers([])
         rpr.AddRegionOrMarker.return_value = "(ProjectMarker*)0x0000000000000000"
         result = register("project_tools", song_parts)["create_regions_from_items"](0)
         assert result["success"] is False
